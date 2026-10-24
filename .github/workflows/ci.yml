@@ -1,0 +1,161 @@
+# Build and test viron-strata:
+#   build      unit tests (poll loop against a fake Viron, tweening), the
+#              viron-usd conformance file, headless render tests on Mesa
+#              llvmpipe (golden image, picking, floor batching)
+#   conformance  regenerates the conformance file from viron-usd's current
+#              main and fails if its layout conventions have drifted
+#   integration  a real Viron (pinned commit) on PostgreSQL 12, a driver that
+#              changes it, and the client watching headlessly; --verify must
+#              find the client's world equal to GET /locations/placements
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Viron with GET /locations/placements (viron#235) and the bearerAuth scheme.
+  VIRON_COMMIT: bd4a1f82a460a2888042880a68347c91cb84c2c5
+
+jobs:
+  build:
+    name: Build and test (unit, conformance, headless render)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/50_mesa.json
+    steps:
+      - name: Install toolchain, libcurl, SDL3 build dependencies and Mesa
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential cmake pkg-config xz-utils libcurl4-openssl-dev \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
+            libegl1 libegl-mesa0 libgl1-mesa-dri libgl1
+      - uses: actions/checkout@v4
+      - name: Configure (Strata fetched at strata.ref)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVIRON_STRATA_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: golden-actual
+          path: build/golden-two-grids-actual.png
+          if-no-files-found: ignore
+
+  conformance:
+    name: viron-usd conventions unchanged
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Preponderous-Software/viron-usd
+          path: viron-usd
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate the conformance file from viron-usd main and compare
+        run: |
+          python3 tools/gen_conformance.py viron-usd /tmp/now.json
+          python3 - <<'EOF'
+          import json
+          a = json.load(open("test/conformance/viron_usd_mapping.json"))
+          b = json.load(open("/tmp/now.json"))
+          a.pop("viron_usd_commit"); b.pop("viron_usd_commit")
+          if a != b:
+              raise SystemExit("viron-usd's mapping has changed: regenerate test/conformance/viron_usd_mapping.json "
+                               "with tools/gen_conformance.py and update src/mapping.cpp to match")
+          print("viron-usd conventions match the checked-in conformance file")
+          EOF
+
+  integration:
+    name: Integration (real Viron + driver + headless client)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:12
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/50_mesa.json
+      VIRON_URL: http://localhost:9999
+    steps:
+      - name: Install toolchain, libcurl, SDL3 build dependencies, Mesa and psql
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libcurl4-openssl-dev postgresql-client \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
+            libegl1 libegl-mesa0 libgl1-mesa-dri libgl1
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Preponderous-Software/viron
+          ref: ${{ env.VIRON_COMMIT }}
+          path: viron
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Build Viron
+        working-directory: viron
+        run: ./mvnw -q -B -DskipTests package
+      - name: Create the schema and start Viron
+        run: |
+          export PGPASSWORD=postgres
+          psql -h localhost -U postgres -f viron/db-scripts/setup/create_sequences.sql
+          psql -h localhost -U postgres -f viron/db-scripts/setup/create_tables.sql
+          head -c 48 /dev/urandom | base64 > "$RUNNER_TEMP/jwt.secret"
+          # stringtype=unspecified: Viron binds creation dates as strings into
+          # TIMESTAMP columns (the same setting viron-usd's integration uses).
+          JWT_SECRET="$(cat "$RUNNER_TEMP/jwt.secret")" USAGE_REPORTING_ENABLED=false \
+            nohup java -jar viron/target/viron-*.jar \
+            "--database.dbUrl=jdbc:postgresql://localhost:5432/postgres?stringtype=unspecified" \
+            > "$RUNNER_TEMP/viron.log" 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://localhost:9999/actuator/health && exit 0
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/viron.log"; exit 1
+      - name: Build the client
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVIRON_STRATA_BUILD_TESTS=OFF
+          cmake --build build -j 4 --target viron-strata
+      - name: Driver + client, then --verify
+        run: |
+          export VIRON_TOKEN="$(python3 tools/mint_dev_token.py "$RUNNER_TEMP/jwt.secret")"
+          tools/integration.sh build integration-frames
+      - name: A rejected token stops the client with exit code 1
+        run: |
+          set +e
+          VIRON_TOKEN=not-a-token build/viron-strata --environment 1 --headless --duration 2 > rejected.log 2>&1
+          code=$?
+          cat rejected.log
+          test "$code" = 1 && grep -q "token rejected" rejected.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-frames
+          path: integration-frames
+          if-no-files-found: ignore
