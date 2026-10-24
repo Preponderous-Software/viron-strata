@@ -10,6 +10,8 @@ A live, read-only 3D view of a [Viron](https://github.com/Preponderous-Software/
 |---|---|
 | ![Three 12x12 grids with 59 entities; a picked cell lists its entity's id and name](docs/media/live-three-grids.png) | ![The same world drawn dim with "stale for 5 s, unreachable" in the HUD](docs/media/stale.png) |
 
+**In a browser:** [viron-strata.play.danielstephenson.dev](https://viron-strata.play.danielstephenson.dev) plays a recorded run with no server or token, and can watch your own Viron with a read-only token (see [In the browser](#in-the-browser)).
+
 It implements RFC 0030 in [Preponderous-Software/rfcs](https://github.com/Preponderous-Software/rfcs). Its companion is [viron-usd](https://github.com/Preponderous-Software/viron-usd), which records a Viron run as OpenUSD for playback afterwards. viron-strata shows the run while it happens. The two use the same layout, so a live view and a recording of the same run line up.
 
 ## What it does
@@ -23,7 +25,7 @@ It implements RFC 0030 in [Preponderous-Software/rfcs](https://github.com/Prepon
 
 ## Build
 
-CMake 3.24+, a C++17 compiler, libcurl (`libcurl4-openssl-dev`), and the X11/EGL development packages Strata's SDL3 build needs on Linux (see `.github/workflows/ci.yml`). Strata `v0.4.0` (pinned in `strata.ref`) and nlohmann/json 3.11.3 (pinned by SHA-256) are fetched at configure time.
+CMake 3.24+, a C++17 compiler, libcurl (`libcurl4-openssl-dev`), and the X11/EGL development packages Strata's SDL3 build needs on Linux (see `.github/workflows/ci.yml`). Strata `v0.6.0` (pinned in `strata.ref`) and nlohmann/json 3.11.3 (pinned by SHA-256) are fetched at configure time.
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -52,6 +54,35 @@ build/viron-strata --environment 4 --headless --duration 2 --verify
 
 `--verify` waits for a fresh poll at the end, then compares the client's world with an independent `GET /locations/placements`. If they differ, or an entity is not drawn on its cell, it exits with status 1.
 
+`--demo web/demo/recording.json` plays the recorded run the browser page uses, through the same poll loop, with no server.
+
+## In the browser
+
+The same client builds for the browser with Emscripten and Strata's WebGL 2 backend (`app/web_main.cpp`, `web/shell.html`). The page is published on arcade at **https://viron-strata.play.danielstephenson.dev**.
+
+| Demo mode on a desktop | Watching a local Viron with a read-only token | iPhone 13 (cells stack when the screen is tall) |
+|---|---|---|
+| ![The page playing the recorded run: two grids, 13 entities, frame 46 of 207](docs/media/web-demo.png) | ![The page in live mode against a local Viron while tools/driver.py moves 15 entities](docs/media/web-live.png) | ![The page on an iPhone 13 profile, grids stacked, a picked cell listed under the view](docs/media/web-phone.png) |
+
+*Captured by the smoke test (`web/smoke/smoke.cjs`) in headless Chromium.*
+
+- **Demo mode** (the default): `web/demo/recording.json` is built into the page. It is a real run: [`tools/driver.py`](tools/driver.py) changed a throwaway local Viron for 50 seconds while [`tools/record_demo.py`](tools/record_demo.py) polled it with a read-only token and saved what Viron answered (format `viron-strata-demo/1`). The page plays it back through the client's own poll loop (`src/demo.h`), so it works for anyone, with no server and no token, and loops at the end.
+- **Your Viron**: the "Your Viron…" form takes a URL, an environment (id or name), a token and a poll period. A link can carry them in the fragment, `#viron=https://viron.example.com&environment=4&token=...`, which never reaches a web server; the page reads the token and then removes it from the address bar. The token is kept only in the page's memory: it is not stored and is sent only to that Viron. No token is in the bundle.
+  - The Viron must allow the page's origin: `VIRON_CORS_ALLOWED_ORIGINS=https://viron-strata.play.danielstephenson.dev` ([viron#244](https://github.com/Preponderous-Software/viron/issues/244)). It must be served over `https://`, because an https page cannot read plain http.
+  - Use a **read-only token** (`scope: viron:read`, [viron#245](https://github.com/Preponderous-Software/viron/issues/245)), minted with Viron's `scripts/mint_read_token.py`. Viron answers it `403` on every write, so a token pasted into a page cannot change anything, wherever it ends up.
+- **Read-only, as on the desktop.** In the browser, `src/async_poll.h` runs `PollCore`'s own step against the answers fetched so far. When it needs a path that has not been fetched, the page fetches it with `emscripten_fetch` (always `GET`) and tries the step again. Each step therefore makes the same requests, in the same order, as on the desktop, and handles every answer the same way. The unit tests check this request for request.
+- **Touch**: drag pans, tap picks a cell (on a phone the cell's entities are listed under the view), and the buttons zoom, rotate and re-frame. The page caps the device pixel ratio at 2 and scales SDL's pointer units to drawable pixels (the asn1-viz#9 trap). The smoke test checks that a real tap picks the same cell as a direct pick at that point, on a desktop, an iPhone 13 profile (DPR 3) and a DPR-2 phone.
+
+Build it:
+
+```
+emcmake cmake -S . -B build-web -DVIRON_STRATA_WEB=ON
+cmake --build build-web -j4
+ctest --test-dir build-web --output-on-failure   # the unit tests as wasm, under Node
+```
+
+The page is `build-web/viron-strata.html` (copy it to `index.html`) with `viron-strata.js` and `viron-strata.wasm`. `.github/workflows/browser.yml` builds it, runs the smoke test in demo mode, and in live mode against a real Viron (watched with a read-only token while the driver writes, plus a bad token that must stop the page), then deploys it to arcade from `main`.
+
 ## Trying it against a local Viron
 
 [docs/LOCAL_VIRON.md](docs/LOCAL_VIRON.md) shows how to start a throwaway Viron, mint a token for it, and run [`tools/driver.py`](tools/driver.py), the demo driver that recorded the GIF above. The driver writes to Viron. viron-strata never does.
@@ -61,11 +92,13 @@ build/viron-strata --environment 4 --headless --duration 2 --verify
 - `[unit]`: the poll loop against a scripted fake Viron. That covers which requests each poll makes, steady-state cost, refreshing grids and names, the name fallback, 401, 404, 503 + `Retry-After`, backoff and recovery, an old Viron, and schema errors. It also covers tweening, snapping, growing and shrinking, and SHA-256 test vectors.
 - `[conformance]`: offsets, colours, grid origins, cell centres, entity positions and floor face order, checked against `test/conformance/viron_usd_mapping.json`, which `tools/gen_conformance.py` generates from viron-usd's `mapping.py`. A CI job regenerates that file from viron-usd's `main` and fails if the conventions drift.
 - `[render]` (EGL + GL 4.5): a fixed two-grid world compared with a golden image (16x10 block averages, so the test tolerates small rasteriser differences), picking cells on both grids, and batching more than 200 floors into one mesh.
-- Integration (CI): a real Viron at a pinned commit on PostgreSQL 12. The driver changes it while the client watches, then `--verify` runs once the driver stops. A rejected token must stop the client.
+- `[unit]` also covers the browser's `AsyncPoll` (the same requests and states as `PollCore`, one fetch at a time) and demo playback (frames follow the clock, the loop, the bundled recording).
+- Integration (CI): a real Viron at a pinned commit on PostgreSQL 12. The driver changes it while the client watches with a read-only token, then `--verify` runs once the driver stops. A rejected token must stop the client.
+- Browser (CI): the page in headless Chromium, in demo mode and against a real Viron (see [In the browser](#in-the-browser)).
 
 ## Not yet
 
-- **A browser build.** Strata v0.4.0 can target WebGL 2, but Viron sends no CORS headers, and any Viron token can write, so a page holding one would hand out write access. RFC 0030 stages the browser view behind a Viron change: either a CORS allow-list or a same-origin proxy, plus a read-only token or scope. Those changes are tracked as [viron#244](https://github.com/Preponderous-Software/viron/issues/244) (CORS) and [viron#245](https://github.com/Preponderous-Software/viron/issues/245) (a read-only token).
+- **A public live Viron.** The page's live mode needs a Viron that lists its origin; no public one is running, so the arcade page opens in demo mode.
 - **Picking one cube** among several on a cell would need primitive raycasts in Strata, which would be a Strata change first.
 - Push updates (SSE or WebSocket) and an `ETag` or revision counter on `/locations/placements` would make an idle world nearly free to watch. Both would be Viron changes.
 

@@ -22,8 +22,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Viron with GET /locations/placements (viron#235) and the bearerAuth scheme.
-  VIRON_COMMIT: bd4a1f82a460a2888042880a68347c91cb84c2c5
+  # Viron with GET /locations/placements (viron#235), the bearerAuth scheme,
+  # and read-only tokens (scope viron:read, viron#245).
+  VIRON_COMMIT: 879d3163a860ee90eb4df45e92de446471092865
 
 jobs:
   build:
@@ -145,6 +146,8 @@ jobs:
       - name: Driver + client, then --verify
         run: |
           export VIRON_TOKEN="$(python3 tools/mint_dev_token.py "$RUNNER_TEMP/jwt.secret")"
+          # The client watches with a read-only token, as a viewer should; the driver writes with VIRON_TOKEN.
+          export VIRON_READ_TOKEN="$(JWT_SECRET="$(cat "$RUNNER_TEMP/jwt.secret")" python3 viron/scripts/mint_read_token.py --subject ci-viewer --days 1)"
           tools/integration.sh build integration-frames
       - name: A rejected token stops the client with exit code 1
         run: |

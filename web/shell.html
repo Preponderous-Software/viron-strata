@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>viron-strata</title>
+<meta name="description" content="viron-strata: a live, read-only 3D view of a Viron world, drawn with the Strata engine. Plays a recorded run with no server, or watches your own Viron.">
+<style>
+  :root {
+    --bg: #090b12; --panel: rgba(16, 19, 30, 0.94); --line: #2a3046; --text: #e6eaf2; --dim: #9aa3b8;
+    --accent: #ffc23a; --btn: #1a1f30; --btn-on: #3a3118; --ok: #73f080; --demo: #80bfff; --warn: #ffbf33; --bad: #ff5a4d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+  .bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 6px max(10px, env(safe-area-inset-left)); background: var(--panel); }
+  #top { border-bottom: 1px solid var(--line); padding-top: max(6px, env(safe-area-inset-top)); }
+  #tools { border-top: 1px solid var(--line); padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+  .brand { font-weight: 700; letter-spacing: 0.03em; margin-right: 6px; }
+  .brand a { color: var(--text); text-decoration: none; }
+  #stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  canvas#canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; background: #000; }
+  button { font: inherit; color: var(--text); background: var(--btn); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 11px; min-height: 36px; cursor: pointer; touch-action: manipulation; }
+  button[aria-pressed="true"] { background: var(--btn-on); border-color: var(--accent); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); }
+  .group { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+  #state { font: 12px ui-monospace, monospace; margin-left: auto; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; max-width: 55%; color: var(--dim); }
+  #state.live { color: var(--ok); } #state.demo { color: var(--demo); }
+  #state.warn { color: var(--warn); } #state.bad { color: var(--bad); }
+  /* Over the bottom of the view, not under it: showing it must not resize the canvas (and re-frame the camera). */
+  #sheet { position: absolute; left: 0; right: 0; bottom: 0; display: none; padding: 6px 12px; background: var(--panel);
+    border-top: 1px solid var(--line); font: 12px/1.4 ui-monospace, monospace; max-height: 40%; overflow-y: auto;
+    white-space: pre; -webkit-user-select: text; user-select: text; }
+  body.compact #sheet.has { display: block; }
+  #loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; max-width: min(92vw, 460px); text-align: center; }
+  #connect { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.55); padding: 16px; z-index: 5; }
+  #connect.open { display: flex; }
+  #connect form { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px;
+    width: min(100%, 460px); max-height: 100%; overflow-y: auto; -webkit-user-select: text; user-select: text; }
+  #connect h2 { margin: 0 0 10px; font-size: 16px; }
+  #connect label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
+  #connect input { width: 100%; font: 16px ui-monospace, monospace; color: var(--text); background: #0d1019;
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  #connect p { color: var(--dim); font-size: 12.5px; margin: 10px 0 0; }
+  #connect .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  #connect .err { color: var(--bad); min-height: 1.2em; }
+  code { font: 12px ui-monospace, monospace; color: var(--text); }
+  a { color: var(--accent); }
+  @media (max-width: 640px) {
+    #state { max-width: 100%; margin-left: 0; flex-basis: 100%; }
+    button { padding: 6px 8px; }
+  }
+</style>
+</head>
+<body>
+<div id="top" class="bar">
+  <span class="brand"><a href="https://github.com/Preponderous-Software/viron-strata" title="Source and documentation">viron-strata</a></span>
+  <div class="group" role="group" aria-label="Source">
+    <button id="demoBtn" title="Play a recorded run of a real Viron: no server or token needed">Demo</button>
+    <button id="connectBtn" title="Watch your own Viron, with a read-only token">Your Viron&hellip;</button>
+  </div>
+  <span id="state" aria-live="polite"></span>
+</div>
+
+<div id="stage">
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <div id="sheet" aria-live="polite"></div>
+</div>
+
+<div id="tools" class="bar" role="group" aria-label="View">
+  <button data-key="9" title="Frame every grid (F)">Home</button>
+  <button id="zoomIn" title="Zoom in (wheel)" aria-label="Zoom in">+</button>
+  <button id="zoomOut" title="Zoom out (wheel)" aria-label="Zoom out">&minus;</button>
+  <button data-key="20" title="Rotate left (Q)" aria-label="Rotate left">&#x21BA;</button>
+  <button data-key="8" title="Rotate right (E)" aria-label="Rotate right">&#x21BB;</button>
+  <span class="sep"></span>
+  <button data-key="43" title="Show or hide the text on the view (Tab)">HUD</button>
+</div>
+
+<div id="connect" role="dialog" aria-modal="true" aria-labelledby="connectTitle">
+  <form id="connectForm" autocomplete="off">
+    <h2 id="connectTitle">Watch your own Viron</h2>
+    <label for="url">Viron URL</label>
+    <input id="url" name="url" type="url" placeholder="https://viron.example.com" required spellcheck="false">
+    <label for="env">Environment (id or name)</label>
+    <input id="env" name="env" type="text" placeholder="1" required spellcheck="false">
+    <label for="token">Read-only token</label>
+    <input id="token" name="token" type="password" placeholder="eyJ..." spellcheck="false" autocomplete="off">
+    <label for="period">Poll every (ms)</label>
+    <input id="period" name="period" type="number" min="50" max="10000" step="50" value="250">
+    <p class="err" id="connectErr"></p>
+    <p>The page only reads: every request is a <code>GET</code>. Use a <b>read-only</b> token
+      (<code>scope: viron:read</code>, minted with Viron's <code>scripts/mint_read_token.py</code>), so it cannot
+      change anything wherever it ends up. The token stays in this tab's memory: it is not stored, and it is sent
+      only to the Viron above.</p>
+    <p>That Viron must allow this page's origin, <code id="origin"></code>, in
+      <code>VIRON_CORS_ALLOWED_ORIGINS</code>, and be served over <code>https://</code> (a page on https cannot read
+      plain http).</p>
+    <div class="row">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" aria-pressed="true">Connect</button>
+    </div>
+  </form>
+</div>
+
+<div id="loading">Loading viron-strata&hellip;</div>
+
+<script>
+'use strict';
+// Everything in a block, so nothing here collides with the names Emscripten's
+// generated code declares at the top level (it has its own `err`, for one).
+// `var Module` still reaches the global scope, which is where Emscripten looks.
+{
+  const canvas = document.getElementById('canvas');
+  const loading = document.getElementById('loading');
+  const stateEl = document.getElementById('state');
+  const sheet = document.getElementById('sheet');
+  const dialog = document.getElementById('connect');
+  const form = document.getElementById('connectForm');
+  const err = document.getElementById('connectErr');
+  document.getElementById('origin').textContent = location.origin;
+  let api = null;
+
+  let lastW = 0, lastH = 0, lastDpr = 0;
+  function fit() {
+    // The engine sizes the canvas through SDL, which multiplies by the device
+    // pixel ratio; at most 2 drawn pixels per CSS pixel keeps phones quick.
+    // The C++ side scales SDL's pointer units to drawable pixels to match.
+    const st = document.getElementById('stage');
+    const w = Math.max(1, st.clientWidth), h = Math.max(1, st.clientHeight);
+    const dpr = window.devicePixelRatio || 1;
+    if (api && (w !== lastW || h !== lastH || dpr !== lastDpr)) {
+      lastW = w; lastH = h; lastDpr = dpr;
+      const k = dpr > 2 ? 2 / dpr : 1;
+      const compact = w < 760;
+      document.body.classList.toggle('compact', compact);
+      api.resize(Math.round(w * k), Math.round(h * k), w, h, compact ? 1 : 0);
+    }
+  }
+
+  function pressed(mode) {
+    document.getElementById('demoBtn').setAttribute('aria-pressed', String(mode === 'demo'));
+    document.getElementById('connectBtn').setAttribute('aria-pressed', String(mode === 'live'));
+  }
+  function startDemo() {
+    if (!api || !api.demo()) return;
+    pressed('demo');
+    canvas.focus();
+  }
+  function connect(url, token, env, period) {
+    if (!api) return false;
+    if (!/^https?:\/\//i.test(url)) { err.textContent = 'The URL must start with https:// (or http:// for a local page).'; return false; }
+    if (location.protocol === 'https:' && /^http:\/\//i.test(url)) {
+      err.textContent = 'This page is served over https, so the browser will not let it read an http:// Viron.';
+      return false;
+    }
+    if (!api.connect(url, token || '', env, Number(period) || 250)) { err.textContent = 'Those settings were not accepted.'; return false; }
+    pressed('live');
+    canvas.focus();
+    return true;
+  }
+
+  // #viron=<url>&environment=<id|name>[&token=<jwt>][&period=<ms>] connects at
+  // once. The fragment never reaches a server; the token is read and then
+  // removed from the address bar and history. ?viron= and ?environment= only
+  // fill in the form (never put a token in a query string: servers log those).
+  function fromLocation() {
+    const q = new URLSearchParams(location.search);
+    const f = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const url = f.get('viron') || q.get('viron') || '';
+    const env = f.get('environment') || q.get('environment') || '';
+    const period = f.get('period') || q.get('period') || '';
+    const token = f.get('token') || '';
+    if (f.has('token')) {
+      f.delete('token');
+      const rest = f.toString();
+      history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
+    }
+    document.getElementById('url').value = url;
+    document.getElementById('env').value = env;
+    if (period) document.getElementById('period').value = period;
+    return { url, env, token, period, auto: f.has('viron') && !!env };
+  }
+
+  function show(s) {
+    stateEl.className = s.mode === 'none' ? '' : s.state === 'live' ? (s.mode === 'demo' ? 'demo' : 'live')
+      : (s.state === 'stale' || s.state === 'Viron busy') ? 'warn' : s.state === 'connecting' ? '' : 'bad';
+    const what = s.mode === 'demo' ? 'Demo (recorded run)' : s.mode === 'live' ? 'Live' : '';
+    stateEl.textContent = what ? `${what}: ${s.environment || '…'}  ${s.entities} entities  ${s.line}` : '';
+    const lines = [];
+    if (s.pick) {
+      lines.push(`grid ${s.pick.grid} (${s.pick.x}, ${s.pick.y}): ${s.pick.entities.length} here`);
+      for (const e of s.pick.entities) lines.push(`  #${e.id} ${e.name}`);
+    }
+    const text = lines.join('\n');
+    if (sheet.textContent !== text) sheet.textContent = text;
+    sheet.classList.toggle('has', lines.length > 0);
+  }
+
+  var Module = {
+    canvas: canvas,
+    print: (t) => console.log(t),
+    printErr: (t) => console.warn(t),
+    onRendererFailed: (why) => {
+      loading.textContent = 'This browser could not start WebGL 2: ' + why;
+    },
+    onViewerReady: () => {
+      api = {
+        demo: Module.cwrap('vs_demo', 'number', []),
+        connect: Module.cwrap('vs_connect', 'number', ['string', 'string', 'string', 'number']),
+        resize: Module.cwrap('vs_resize', null, ['number', 'number', 'number', 'number', 'number']),
+        key: Module.cwrap('vs_key', null, ['number']),
+        zoom: Module.cwrap('vs_zoom', null, ['number']),
+        click: Module.cwrap('vs_click', null, ['number', 'number']),
+        status: () => JSON.parse(Module.ccall('vs_status', 'string', [], [])),
+      };
+      window.vironStrata = { status: api.status, click: api.click, demo: startDemo };
+      loading.style.display = 'none';
+      fit();
+      const start = fromLocation();
+      if (!(start.auto && connect(start.url, start.token, start.env, start.period))) startDemo();
+      fit();
+      setInterval(() => show(api.status()), 250);
+    },
+  };
+
+  document.getElementById('demoBtn').addEventListener('click', () => { dialog.classList.remove('open'); startDemo(); });
+  document.getElementById('connectBtn').addEventListener('click', () => {
+    err.textContent = '';
+    dialog.classList.add('open');
+    document.getElementById(document.getElementById('url').value ? 'token' : 'url').focus();
+  });
+  document.getElementById('cancel').addEventListener('click', () => dialog.classList.remove('open'));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    const tokenInput = document.getElementById('token');
+    if (connect(document.getElementById('url').value.trim(), tokenInput.value.trim(),
+                document.getElementById('env').value.trim(), document.getElementById('period').value)) {
+      tokenInput.value = '';  // handed to the viewer; not kept in the page
+      dialog.classList.remove('open');
+    }
+  });
+  document.querySelectorAll('[data-key]').forEach(b => b.addEventListener('click', () => {
+    if (api) api.key(Number(b.dataset.key));
+    canvas.focus();
+  }));
+  document.getElementById('zoomIn').addEventListener('click', () => api && api.zoom(0.8));
+  document.getElementById('zoomOut').addEventListener('click', () => api && api.zoom(1.25));
+  window.addEventListener('resize', fit);
+  new ResizeObserver(fit).observe(document.getElementById('stage'));
+}
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
