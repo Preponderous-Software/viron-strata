@@ -138,7 +138,18 @@ OrbitCamera fitCamera(const std::vector<Grid>& grids, float aspect) {
     }
     cam.targetX = maxX * 0.5f;
     cam.targetZ = maxZ * 0.5f + maxZ * 0.04f;
-    const float fit = std::max(maxX / std::max(aspect, 0.1f), maxZ);
+    const float a = std::max(aspect, 0.1f);
+    if (a < 0.9f && maxX > maxZ * 1.2f) {
+        // A tall view (a phone held upright) of grids laid side by side: turn
+        // the camera a quarter so they stack down the screen instead of
+        // shrinking to fit across it.
+        cam.yawDegrees = 90.0f;
+        cam.targetX = maxX * 0.5f + maxX * 0.04f;
+        cam.targetZ = maxZ * 0.5f;
+        cam.distance = std::max(maxZ / a, maxX) * 1.5f + 2.0f;
+        return cam;
+    }
+    const float fit = std::max(maxX / a, maxZ);
     cam.distance = fit * 1.5f + 2.0f;
     return cam;
 }

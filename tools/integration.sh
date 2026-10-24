@@ -4,7 +4,10 @@
 # client's world must equal GET /locations/placements (--verify), and every
 # entity must be drawn on its cell.
 #
-#   VIRON_URL=http://localhost:9999 VIRON_TOKEN=... tools/integration.sh <build-dir> [frames-dir]
+#   VIRON_URL=http://localhost:9999 VIRON_TOKEN=... [VIRON_READ_TOKEN=...] tools/integration.sh <build-dir> [frames-dir]
+#
+# The driver writes with VIRON_TOKEN. The client reads with VIRON_READ_TOKEN
+# when it is set (a read-only token, scope viron:read), else VIRON_TOKEN.
 #
 # Needs a running Viron (docs/LOCAL_VIRON.md) and an EGL + GL 4.5 driver
 # (Mesa llvmpipe: LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe).
@@ -27,12 +30,13 @@ for _ in $(seq 1 100); do [ -s "$TMP/env" ] && break; sleep 0.1; done
 ENV_ID="$(cat "$TMP/env")"
 echo "watching environment $ENV_ID while the driver runs"
 
+CLIENT_TOKEN="${VIRON_READ_TOKEN:-$VIRON_TOKEN}"
 ARGS=(--viron-url "$URL" --environment "$ENV_ID" --headless --duration 3 --width 480 --height 300)
 if [ -n "$FRAMES" ]; then mkdir -p "$FRAMES"; ARGS+=(--frames "$FRAMES" --fps 5); fi
 # First while the driver is writing (no --verify: the world is moving) ...
-"$BUILD/viron-strata" "${ARGS[@]}"
+VIRON_TOKEN="$CLIENT_TOKEN" "$BUILD/viron-strata" "${ARGS[@]}"
 wait "$DRIVER"
 cat "$TMP/driver.log"
 # ... then once it has stopped: the client must agree with Viron exactly.
-"$BUILD/viron-strata" --viron-url "$URL" --environment "$ENV_ID" --headless --duration 2 --width 480 --height 300 \
+VIRON_TOKEN="$CLIENT_TOKEN" "$BUILD/viron-strata" --viron-url "$URL" --environment "$ENV_ID" --headless --duration 2 --width 480 --height 300 \
   --screenshot "${FRAMES:-$TMP}/final.png" --verify

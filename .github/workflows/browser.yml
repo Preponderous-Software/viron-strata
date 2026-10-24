@@ -1,0 +1,184 @@
+# Builds viron-strata for the browser (Emscripten + Strata's WebGL 2 backend),
+# runs the unit tests as wasm under Node, and smoke-tests the page in headless
+# Chromium:
+#   demo mode  on a desktop, an iPhone 13 profile and a DPR-2 phone, with no
+#              server: the built-in recording plays, the canvas draws, and a
+#              click or tap picks the cell under it (SDL pointer units scaled
+#              to drawable pixels, asn1-viz#9);
+#   live mode  against a real Viron (pinned commit with the CORS allow-list,
+#              viron#244, and read-only tokens, viron#245) on PostgreSQL 12,
+#              changed by tools/driver.py, watched with a read-only token; and
+#              a bad token must stop the page with "token rejected".
+# When enabled, deploys the page to arcade as
+# https://viron-strata.play.danielstephenson.dev
+name: Browser build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Viron with the CORS allow-list (#244) and the viron:read scope (#245).
+  VIRON_COMMIT: 879d3163a860ee90eb4df45e92de446471092865
+
+jobs:
+  browser:
+    name: Web build and smoke test (headless Chromium, demo + live Viron)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:12
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the pinned Strata
+        run: |
+          ref="$(tr -d '[:space:]' < strata.ref)"
+          test -n "$ref"
+          git init -q "$RUNNER_TEMP/strata"
+          git -C "$RUNNER_TEMP/strata" fetch -q --depth 1 https://github.com/Preponderous-Software/strata.git "$ref"
+          git -C "$RUNNER_TEMP/strata" checkout -q FETCH_HEAD
+          echo "STRATA_DIR=$RUNNER_TEMP/strata" >> "$GITHUB_ENV"
+
+      - name: Set up emsdk 6.0.11 (Strata's pin)
+        run: |
+          git clone -q --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.11
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.11
+
+      - name: Configure and build
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release -DVIRON_STRATA_WEB=ON \
+            -DVIRON_STRATA_WARNINGS_AS_ERRORS=ON -DFETCHCONTENT_SOURCE_DIR_STRATA="$STRATA_DIR" -Wno-dev
+          cmake --build build-web -j "$(nproc)"
+
+      - name: Unit tests as wasm (Node)
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          ctest --test-dir build-web --output-on-failure
+
+      - name: Assemble the site
+        run: |
+          mkdir -p web-site
+          cp build-web/viron-strata.html web-site/index.html
+          cp build-web/viron-strata.js build-web/viron-strata.wasm web-site/
+          # The page is the build output only: no token or secret can be in it.
+          if grep -l -E 'eyJ[A-Za-z0-9_-]{10,}\.' web-site/*; then echo "a JWT is in the bundle"; exit 1; fi
+          ls -l web-site
+          echo "site: $(du -sh web-site | cut -f1)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright and Chromium
+        working-directory: web/smoke
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Serve the page
+        run: |
+          python3 -m http.server 8080 --bind 127.0.0.1 --directory web-site > http.log 2>&1 &
+          sleep 1
+
+      - name: Smoke test, demo mode (desktop, iPhone 13 profile, a DPR-2 phone)
+        run: |
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/desktop
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/phone --phone
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/phone-dpr2 --phone --dpr 2
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Preponderous-Software/viron
+          ref: ${{ env.VIRON_COMMIT }}
+          path: viron
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Start Viron (CORS allows the page's origin)
+        run: |
+          (cd viron && ./mvnw -q -B -DskipTests package)
+          export PGPASSWORD=postgres
+          psql -h localhost -U postgres -f viron/db-scripts/setup/create_sequences.sql
+          psql -h localhost -U postgres -f viron/db-scripts/setup/create_tables.sql
+          head -c 48 /dev/urandom | base64 > "$RUNNER_TEMP/jwt.secret"
+          JWT_SECRET="$(cat "$RUNNER_TEMP/jwt.secret")" USAGE_REPORTING_ENABLED=false \
+            VIRON_CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 \
+            nohup java -jar viron/target/viron-*.jar \
+            "--database.dbUrl=jdbc:postgresql://localhost:5432/postgres?stringtype=unspecified" \
+            > "$RUNNER_TEMP/viron.log" 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://localhost:9999/actuator/health && exit 0
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/viron.log"; exit 1
+
+      - name: Smoke test, live mode (a driver writes; the page watches with a read-only token)
+        run: |
+          python3 tools/mint_dev_token.py "$RUNNER_TEMP/jwt.secret" > "$RUNNER_TEMP/driver.token"
+          JWT_SECRET="$(cat "$RUNNER_TEMP/jwt.secret")" python3 viron/scripts/mint_read_token.py \
+            --subject smoke --days 1 > "$RUNNER_TEMP/read.token"
+          # The read-only token cannot write.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(cat "$RUNNER_TEMP/read.token")" \
+            -H 'Content-Type: application/json' -d '{"name":"x","numGrids":1,"gridSize":2}' http://localhost:9999/api/v1/environments)
+          test "$code" = 403
+          VIRON_TOKEN="$(cat "$RUNNER_TEMP/driver.token")" python3 tools/driver.py --viron-url http://localhost:9999 \
+            --name browser-smoke --ticks 160 --tps 4 --env-file "$RUNNER_TEMP/env" > "$RUNNER_TEMP/driver.log" 2>&1 &
+          for _ in $(seq 1 100); do [ -s "$RUNNER_TEMP/env" ] && break; sleep 0.2; done
+          env_id="$(cat "$RUNNER_TEMP/env")"
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/live --live http://127.0.0.1:9999 \
+            --environment "$env_id" --token-file "$RUNNER_TEMP/read.token"
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/live-phone --phone --live http://127.0.0.1:9999 \
+            --environment "$env_id" --token-file "$RUNNER_TEMP/read.token"
+          echo not-a-token > "$RUNNER_TEMP/bad.token"
+          node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/live-bad --live http://127.0.0.1:9999 \
+            --environment "$env_id" --token-file "$RUNNER_TEMP/bad.token" --expect-rejected
+          wait
+
+      - name: Upload the site and the smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: |
+            web-site/
+            smoke-out/
+          if-no-files-found: ignore
+
+      - name: Write the deploy version
+        run: |
+          version=$(sed -n 's/^project(viron_strata VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          echo "${version}+g${GITHUB_SHA::7}" > "$RUNNER_TEMP/arcade-version.txt"
+          cat "$RUNNER_TEMP/arcade-version.txt"
+
+      - name: Deploy to arcade
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && vars.ARCADE_ENABLED == 'true')
+        uses: Stephenson-Software/arcade-deploy@v1
+        with:
+          slug: viron-strata
+          token: ${{ secrets.ARCADE_TOKEN }}
+          site-dir: web-site
+          version-file: ${{ runner.temp }}/arcade-version.txt

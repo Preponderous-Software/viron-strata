@@ -2,3 +2,6 @@ build/
 build-*/
 __pycache__/
 *.pyc
+web/smoke/node_modules/
+web-site/
+smoke-out/

@@ -2,6 +2,7 @@
 // with Strata (RFC 0030 in Preponderous-Software/rfcs).
 //
 //   viron-strata --environment <id|name> [--viron-url URL] [--token JWT]
+//   viron-strata --demo web/demo/recording.json    (a recorded run; no server)
 //                [--period-ms N] [--grid-every K] [--name-every M]
 //                [--yaw DEG] [--pitch DEG] [--zoom F] [--pick G,X,Y] [--no-hud]
 //                [--width W --height H]
@@ -19,7 +20,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -27,6 +30,7 @@
 
 #include "strata/strata.hpp"
 
+#include "../src/demo.h"
 #include "../src/poller.h"
 #include "../src/scene.h"
 #include "../src/transport.h"
@@ -45,6 +49,7 @@ struct Args {
     std::string url = "http://localhost:9999";
     std::string environment;
     std::string token;
+    std::string demo;  // a viron-strata-demo/1 recording to play instead of polling a server
     double periodMs = 250;
     int gridEvery = 20;
     int nameEvery = 40;
@@ -62,7 +67,7 @@ struct Args {
 
 void usage(const char* argv0) {
     std::fprintf(stderr,
-                 "usage: %s --environment <id|name> [--viron-url URL] [--token JWT]\n"
+                 "usage: %s --environment <id|name> [--viron-url URL] [--token JWT] | --demo RECORDING.json\n"
                  "          [--period-ms N] [--grid-every K] [--name-every M]\n"
                  "          [--yaw DEG] [--pitch DEG] [--zoom F] [--pick G,X,Y] [--no-hud] [--width W --height H]\n"
                  "          [--headless --duration S [--fps N] [--frames DIR] [--screenshot out.png] [--verify]]\n"
@@ -80,6 +85,7 @@ bool parse(int argc, char** argv, Args& a) {
         };
         if (k == "--viron-url" || k == "--url") a.url = val();
         else if (k == "--environment") a.environment = val();
+        else if (k == "--demo") a.demo = val();
         else if (k == "--token") a.token = val();
         else if (k == "--period-ms") a.periodMs = std::max(10.0, std::atof(val().c_str()));
         else if (k == "--grid-every") a.gridEvery = std::max(1, std::atoi(val().c_str()));
@@ -101,8 +107,8 @@ bool parse(int argc, char** argv, Args& a) {
                 throw std::invalid_argument("--pick takes GRID,X,Y (grid index in gridId order)");
         } else return false;
     }
-    if (a.environment.empty()) {
-        std::fprintf(stderr, "--environment is required\n");
+    if (a.environment.empty() && a.demo.empty()) {
+        std::fprintf(stderr, "--environment (or --demo) is required\n");
         return false;
     }
     return true;
@@ -400,14 +406,39 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 2;
     }
-    if (app.a.token.empty()) std::fprintf(stderr, "viron-strata: no token (--token or VIRON_TOKEN); Viron will answer 401\n");
-
     PollConfig pc;
     pc.environment = app.a.environment;
     pc.periodSeconds = app.a.periodMs / 1000.0;
     pc.gridEvery = app.a.gridEvery;
     pc.nameEvery = app.a.nameEvery;
-    app.poller = std::make_unique<Poller>(makeCurlTransport(app.a.url, app.a.token), pc);
+    if (!app.a.demo.empty()) {
+        if (app.a.verify) {
+            std::fprintf(stderr, "--verify needs a live Viron, not --demo\n");
+            return 2;
+        }
+        std::unique_ptr<DemoTransport> demo;
+        try {
+            std::ifstream in(app.a.demo, std::ios::binary);
+            if (!in) throw std::runtime_error("cannot read " + app.a.demo);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            Recording rec = parseRecording(ss.str());
+            pc.environment = std::to_string(rec.environmentId);
+            pc.periodSeconds = rec.periodSeconds;
+            app.a.periodMs = rec.periodSeconds * 1000.0;
+            app.a.url = "a recording";
+            demo = std::make_unique<DemoTransport>(std::move(rec), now);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "viron-strata: --demo: %s\n", e.what());
+            return 2;
+        }
+        if (app.a.environment.empty()) app.a.environment = "demo";
+        app.poller = std::make_unique<Poller>(std::move(demo), pc);
+    } else {
+        if (app.a.token.empty())
+            std::fprintf(stderr, "viron-strata: no token (--token or VIRON_TOKEN); Viron will answer 401\n");
+        app.poller = std::make_unique<Poller>(makeCurlTransport(app.a.url, app.a.token), pc);
+    }
 
     strata::EngineDesc desc;
     desc.surface = app.a.headless ? STRATA_SURFACE_HEADLESS : STRATA_SURFACE_WINDOW;
