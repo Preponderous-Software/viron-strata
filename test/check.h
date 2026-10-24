@@ -1,6 +1,6 @@
 // A minimal test harness: TEST(name, tag) registers a test; CHECK records a
 // failure and carries on; REQUIRE stops the test. test_main.cpp runs the
-// tests whose tag matches its argument ("[view]", "[render]"), or all.
+// tests whose tag matches its argument ("[unit]", "[render]"), or all.
 #pragma once
 
 #include <functional>
