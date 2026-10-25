@@ -8,7 +8,10 @@
 #   live mode  against a real Viron (pinned commit with the CORS allow-list,
 #              viron#244, and read-only tokens, viron#245) on PostgreSQL 12,
 #              changed by tools/driver.py, watched with a read-only token; and
-#              a bad token must stop the page with "token rejected".
+#              a bad token must stop the page with "token rejected";
+#   fallback   opened as a visitor opens it (no fragment), the page tries the
+#              public world, which refuses this CI origin (CORS), and must fall
+#              back to the demo and say so.
 # When enabled, deploys the page to arcade as
 # https://viron-strata.play.danielstephenson.dev
 name: Browser build
@@ -80,8 +83,9 @@ jobs:
           mkdir -p web-site
           cp build-web/viron-strata.html web-site/index.html
           cp build-web/viron-strata.js build-web/viron-strata.wasm web-site/
-          # The page is the build output only: no token or secret can be in it.
-          if grep -l -E 'eyJ[A-Za-z0-9_-]{10,}\.' web-site/*; then echo "a JWT is in the bundle"; exit 1; fi
+          # The only token the page may carry is the public world's read-only one
+          # (scope viron:read alone); any other JWT in the bundle fails here.
+          python3 tools/check_bundle_tokens.py web-site/*
           ls -l web-site
           echo "site: $(du -sh web-site | cut -f1)"
 
@@ -105,6 +109,9 @@ jobs:
           node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/desktop
           node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/phone --phone
           node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/phone-dpr2 --phone --dpr 2
+
+      - name: Smoke test, public-world fallback (the public Viron refuses this origin)
+        run: node web/smoke/smoke.cjs http://127.0.0.1:8080/ smoke-out/fallback --expect-fallback
 
       - uses: actions/checkout@v4
         with:

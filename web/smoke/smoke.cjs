@@ -2,8 +2,9 @@
 //
 //   node web/smoke/smoke.cjs <page-url> <out-dir> [--phone [--dpr <n>]]
 //        [--live <viron-url> --environment <id> --token-file <file> [--expect-rejected]]
+//        [--public | --expect-fallback] [--site-dir <dir>]
 //
-// Demo mode (always): the page starts with no page errors and plays the
+// Demo mode (the default here; the page is opened with #demo): the page starts with no page errors and plays the
 // built-in recording with no server: the poll loop runs, entities are placed,
 // the recording advances, and the canvas draws (not one flat colour). A real
 // click (or tap) on the canvas goes through SDL and strata_raycast_meshes and
@@ -16,6 +17,17 @@
 // reach "live" with the environment's entities on screen; the token must be
 // gone from the address bar. With --expect-rejected the token is a bad one and
 // the page must say "token rejected" instead.
+//
+// Public world (--public): the page is opened with no fragment, as a visitor
+// opens it, and must go live on the public Viron's "public-world" environment
+// with entities moving, using only GET requests and never putting the token
+// in the address bar. --expect-fallback opens it the same way where that
+// Viron cannot be reached (or refuses this origin) and expects the demo with
+// a note saying the public world is unavailable.
+//
+// --site-dir serves <dir> AS <page-url>'s origin (Playwright routing), so the
+// page can be tested under its real origin, e.g. the arcade one a public
+// Viron's CORS allow-list names, before it is deployed.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +44,9 @@ const live = opt('--live');
 const liveEnv = opt('--environment');
 const tokenFile = opt('--token-file');
 const expectRejected = flag('--expect-rejected');
+const publicWorld = flag('--public');
+const expectFallback = flag('--expect-fallback');
+const siteDir = opt('--site-dir');
 if (!url || !outDir || (opt('--dpr') && !(dpr > 0)) || (live && (!liveEnv || !tokenFile))) {
   console.error('usage: smoke.cjs <url> <out-dir> [--phone [--dpr <n>]] [--live <viron-url> --environment <id> --token-file <f> [--expect-rejected]]');
   process.exit(2);
@@ -92,12 +107,37 @@ function colourCount(png) {
   const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const base = phone ? { ...devices['iPhone 13'], ...(dpr ? { deviceScaleFactor: dpr } : {}) } : { viewport: { width: 1280, height: 800 } };
   const context = await browser.newContext({ ...base, userAgent: (base.userAgent || 'Mozilla/5.0') + ' viron-strata-smoke headless' });
+  if (siteDir) {
+    const origin = new URL(url).origin;
+    const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json' };
+    await context.route(origin + '/**', (route) => {
+      let p = new URL(route.request().url()).pathname;
+      if (p.endsWith('/')) p += 'index.html';
+      const file = path.join(siteDir, path.normalize(p).replace(/^([/\\])+/, ''));
+      if (!fs.existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
+      route.fulfill({ status: 200, body: fs.readFileSync(file), contentType: types[path.extname(file)] || 'application/octet-stream' });
+    });
+  }
   const page = await context.newPage();
   const errors = [];
+  const methods = new Set();
+  page.on('request', (r) => { if (!/^(data|blob):/.test(r.url())) methods.add(r.method()); });
+  // A live world changes between requests: an entity seen in one poll can be
+  // deleted by its driver before the client asks for its name, and Viron
+  // answers that GET /entities/{id} with 404 (the client copes). Those are the
+  // only 404s the public world may produce.
+  const other404 = [];
+  page.on('response', (r) => {
+    if (r.status() === 404 && !(publicWorld && /\/api\/v1\/entities\/\d+$/.test(new URL(r.url()).pathname))) other404.push(r.url());
+  });
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => {
     // A rejected token is answered 401, which Chromium logs as a failed resource load: expected there.
-    if (m.type() === 'error' && !(expectRejected && /401/.test(m.text()))) errors.push('console: ' + m.text());
+    // Where the public Viron is unreachable or refuses this origin, Chromium logs the failed fetch: expected there.
+    const expected = (expectRejected && /401/.test(m.text())) ||
+      (publicWorld && /status of 404/.test(m.text())) ||
+      (expectFallback && /CORS|Failed to fetch|ERR_|net::/.test(m.text()));
+    if (m.type() === 'error' && !expected) errors.push('console: ' + m.text());
   });
   const fail = async (why) => {
     console.error('FAIL: ' + why);
@@ -118,7 +158,7 @@ function colourCount(png) {
   };
   const canvas = page.locator('#canvas');
 
-  let target = url;
+  let target = publicWorld || expectFallback ? url : url + '#demo';
   if (live) {
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
     target = `${url}#viron=${encodeURIComponent(live)}&environment=${encodeURIComponent(liveEnv)}&token=${encodeURIComponent(token)}`;
@@ -129,6 +169,35 @@ function colourCount(png) {
     await page.waitForFunction(() => window.vironStrata, null, { timeout: 90000 });
   } catch (e) {
     await fail('the viewer never became ready: ' + errors.join(' | '));
+  }
+
+  if (publicWorld || expectFallback) {
+    if (expectFallback) {
+      const s = await until('with the public world unreachable, the page should fall back to the demo', (s) => s.mode === 'demo' && s.state === 'live' && s.entities > 0, 40000);
+      const noteText = await page.evaluate(() => window.vironStrata.note());
+      if (!/Public world unavailable/.test(noteText)) await fail('the fallback should say why: note is ' + JSON.stringify(noteText));
+      console.log(`fallback: demo, ${s.entities} entities; note: ${noteText}`);
+    } else {
+      const s1 = await until('the page should go live on the public world', (s) => s.mode === 'live' && s.state === 'live' && s.entities > 0 && s.environment === 'public-world', 60000);
+      if (await page.evaluate(() => window.vironStrata.source()) !== 'public') await fail('the source should be the public world');
+      const before = await page.evaluate(() => window.vironStrata.status());
+      const s2 = await until('polls should keep coming', (s) => s.poll >= s1.poll + 8, 30000);
+      console.log(`public: ${s2.environment} #${s2.environmentId}, ${s2.entities} entities on ${s2.grids} grids, poll ${s2.poll}, ${s2.requests} requests: ${s2.line}`);
+      const shot = await canvas.screenshot({ path: path.join(outDir, 'public.png'), timeout: 180000 });
+      const colours = colourCount(shot);
+      console.log(`public: ${colours} colours (state line ${JSON.stringify(before.line)})`);
+      if (colours < 30) await fail(`the public view drew only ${colours} colours`);
+      const href = await page.evaluate(() => location.href);
+      if (/eyJ/.test(href)) await fail('a token is in the address bar');
+      const writes = [...methods].filter((m) => m !== 'GET');
+      if (writes.length) await fail('the page sent ' + writes.join(', '));
+    }
+    if (other404.length) await fail('unexpected 404s: ' + other404.join(' '));
+    if (errors.length) await fail('page errors: ' + errors.join(' | '));
+    await page.screenshot({ path: path.join(outDir, publicWorld ? 'page-public.png' : 'page-fallback.png') });
+    await browser.close();
+    console.log('ok');
+    return;
   }
 
   if (live) {

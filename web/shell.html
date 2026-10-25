@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>viron-strata</title>
-<meta name="description" content="viron-strata: a live, read-only 3D view of a Viron world, drawn with the Strata engine. Plays a recorded run with no server, or watches your own Viron.">
+<meta name="description" content="viron-strata: a live, read-only 3D view of a Viron world, drawn with the Strata engine. Watches a public Viron world, plays a recorded run with no server, or watches your own Viron.">
 <style>
   :root {
     --bg: #090b12; --panel: rgba(16, 19, 30, 0.94); --line: #2a3046; --text: #e6eaf2; --dim: #9aa3b8;
@@ -33,6 +33,8 @@
     white-space: nowrap; max-width: 55%; color: var(--dim); }
   #state.live { color: var(--ok); } #state.demo { color: var(--demo); }
   #state.warn { color: var(--warn); } #state.bad { color: var(--bad); }
+  #note { display: none; font-size: 12.5px; color: var(--warn); }
+  #note.show { display: inline; }
   /* Over the bottom of the view, not under it: showing it must not resize the canvas (and re-frame the camera). */
   #sheet { position: absolute; left: 0; right: 0; bottom: 0; display: none; padding: 6px 12px; background: var(--panel);
     border-top: 1px solid var(--line); font: 12px/1.4 ui-monospace, monospace; max-height: 40%; overflow-y: auto;
@@ -64,9 +66,11 @@
 <div id="top" class="bar">
   <span class="brand"><a href="https://github.com/Preponderous-Software/viron-strata" title="Source and documentation">viron-strata</a></span>
   <div class="group" role="group" aria-label="Source">
+    <button id="publicBtn" title="Watch the public Viron world live: a driver keeps it moving">Public world</button>
     <button id="demoBtn" title="Play a recorded run of a real Viron: no server or token needed">Demo</button>
     <button id="connectBtn" title="Watch your own Viron, with a read-only token">Your Viron&hellip;</button>
   </div>
+  <span id="note" role="status"></span>
   <span id="state" aria-live="polite"></span>
 </div>
 
@@ -126,8 +130,24 @@
   const dialog = document.getElementById('connect');
   const form = document.getElementById('connectForm');
   const err = document.getElementById('connectErr');
+  const note = document.getElementById('note');
   document.getElementById('origin').textContent = location.origin;
   let api = null;
+
+  // The public Viron world: a public Viron instance that a driver keeps moving,
+  // so this page has something live to show. The token below is PUBLIC BY
+  // DESIGN: its scope is viron:read, so Viron answers 403 to any write made
+  // with it, and the public router does not even pass write methods. It is
+  // still never logged, put in the address bar or stored. The page falls back
+  // to the demo when this Viron cannot be reached.
+  const PUBLIC_WORLD = {
+    url: 'https://viron.play.danielstephenson.dev',
+    environment: 'public-world',
+    period: 250,
+    token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ2aXJvbi1zdHJhdGEtcHVibGljIiwiaXNzIjoidmlyb24ucGxheS5kYW5pZWxzdGVwaGVuc29uLmRldiIsInNjb3BlIjoidmlyb246cmVhZCIsImlhdCI6MTc5Mjg4NjY0MCwiZXhwIjoxOTUwNTY2NjQwLCJqdGkiOiIzMDAyMDg5Yy0zZTRjLTQ3MDktYWZhYS0wZTkzYTk4YWRlNWEifQ.lqhntlHzIgvjoK3ttsn3RdrTwF5rqDzhh2QA6NugxJM',
+  };
+  let source = 'none';  // 'public' | 'demo' | 'live' (your own Viron)
+  let fallbackTimer = 0;
 
   let lastW = 0, lastH = 0, lastDpr = 0;
   function fit() {
@@ -147,13 +167,53 @@
   }
 
   function pressed(mode) {
+    source = mode;
+    document.getElementById('publicBtn').setAttribute('aria-pressed', String(mode === 'public'));
     document.getElementById('demoBtn').setAttribute('aria-pressed', String(mode === 'demo'));
     document.getElementById('connectBtn').setAttribute('aria-pressed', String(mode === 'live'));
   }
+  function say(text) {
+    note.textContent = text;
+    note.classList.toggle('show', !!text);
+  }
   function startDemo() {
+    clearTimeout(fallbackTimer);
     if (!api || !api.demo()) return;
     pressed('demo');
     canvas.focus();
+  }
+  // Watch the public world. With `fallback`, a public Viron that does not
+  // answer (or never goes live) puts the page on the demo instead, and says so.
+  async function startPublic(fallback) {
+    if (!api) return;
+    clearTimeout(fallbackTimer);
+    say('');
+    const fail = (why) => {
+      if (fallback) { startDemo(); say(`Public world unavailable (${why}): playing the recorded demo.`); }
+      else say(`Public world unavailable (${why}).`);
+    };
+    let reachable = false;
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 5000);
+      const r = await fetch(PUBLIC_WORLD.url + '/actuator/health', { cache: 'no-store', signal: ctl.signal });
+      clearTimeout(timer);
+      reachable = r.ok;
+    } catch (e) {
+      reachable = false;
+    }
+    if (!reachable) { fail('no answer'); return; }
+    if (!api.connect(PUBLIC_WORLD.url, PUBLIC_WORLD.token, PUBLIC_WORLD.environment, PUBLIC_WORLD.period)) {
+      fail('not accepted');
+      return;
+    }
+    pressed('public');
+    canvas.focus();
+    // Reachable but never live (the world is gone, or the token was refused).
+    fallbackTimer = setTimeout(() => {
+      const s = api.status();
+      if (source === 'public' && !(s.mode === 'live' && s.state === 'live' && s.poll > 0)) fail(s.state || 'not live');
+    }, 12000);
   }
   function connect(url, token, env, period) {
     if (!api) return false;
@@ -163,6 +223,8 @@
       return false;
     }
     if (!api.connect(url, token || '', env, Number(period) || 250)) { err.textContent = 'Those settings were not accepted.'; return false; }
+    clearTimeout(fallbackTimer);
+    say('');
     pressed('live');
     canvas.focus();
     return true;
@@ -187,13 +249,14 @@
     document.getElementById('url').value = url;
     document.getElementById('env').value = env;
     if (period) document.getElementById('period').value = period;
-    return { url, env, token, period, auto: f.has('viron') && !!env };
+    return { url, env, token, period, auto: f.has('viron') && !!env, demo: f.has('demo') || q.has('demo') };
   }
 
   function show(s) {
     stateEl.className = s.mode === 'none' ? '' : s.state === 'live' ? (s.mode === 'demo' ? 'demo' : 'live')
       : (s.state === 'stale' || s.state === 'Viron busy') ? 'warn' : s.state === 'connecting' ? '' : 'bad';
-    const what = s.mode === 'demo' ? 'Demo (recorded run)' : s.mode === 'live' ? 'Live' : '';
+    const what = s.mode === 'demo' ? 'Demo (recorded run)'
+      : s.mode === 'live' ? (source === 'public' ? 'Public world' : 'Live') : '';
     stateEl.textContent = what ? `${what}: ${s.environment || '…'}  ${s.entities} entities  ${s.line}` : '';
     const lines = [];
     if (s.pick) {
@@ -222,17 +285,23 @@
         click: Module.cwrap('vs_click', null, ['number', 'number']),
         status: () => JSON.parse(Module.ccall('vs_status', 'string', [], [])),
       };
-      window.vironStrata = { status: api.status, click: api.click, demo: startDemo };
+      window.vironStrata = { status: api.status, click: api.click, demo: startDemo,
+        source: () => source, note: () => note.textContent };
       loading.style.display = 'none';
       fit();
+      // #viron=... watches that Viron; #demo (or ?demo) plays the recording;
+      // otherwise the page opens on the public world, falling back to the demo.
       const start = fromLocation();
-      if (!(start.auto && connect(start.url, start.token, start.env, start.period))) startDemo();
+      if (start.auto && connect(start.url, start.token, start.env, start.period)) { /* live */ }
+      else if (start.demo) startDemo();
+      else startPublic(true);
       fit();
       setInterval(() => show(api.status()), 250);
     },
   };
 
-  document.getElementById('demoBtn').addEventListener('click', () => { dialog.classList.remove('open'); startDemo(); });
+  document.getElementById('publicBtn').addEventListener('click', () => { dialog.classList.remove('open'); startPublic(false); });
+  document.getElementById('demoBtn').addEventListener('click', () => { dialog.classList.remove('open'); say(''); startDemo(); });
   document.getElementById('connectBtn').addEventListener('click', () => {
     err.textContent = '';
     dialog.classList.add('open');
