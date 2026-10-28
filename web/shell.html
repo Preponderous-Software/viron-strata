@@ -9,6 +9,8 @@
   :root {
     --bg: #090b12; --panel: rgba(16, 19, 30, 0.94); --line: #2a3046; --text: #e6eaf2; --dim: #9aa3b8;
     --accent: #ffc23a; --btn: #1a1f30; --btn-on: #3a3118; --ok: #73f080; --demo: #80bfff; --warn: #ffbf33; --bad: #ff5a4d;
+    /* The loading shell (web/strata-kit/strata-loader.js) in the page's colours. */
+    --sk-loader-bg: var(--bg); --sk-loader-fg: var(--text); --sk-loader-panel: var(--panel); --sk-loader-accent: var(--accent);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -115,7 +117,7 @@
   </form>
 </div>
 
-<div id="loading">Loading viron-strata&hellip;</div>
+<div id="loading" style="display: none"></div>
 
 <script>
 'use strict';
@@ -274,6 +276,7 @@
     printErr: (t) => console.warn(t),
     onRendererFailed: (why) => {
       loading.textContent = 'This browser could not start WebGL 2: ' + why;
+      StrataLoader.fallback('engine', 'This browser could not start WebGL 2: ' + why);
     },
     onViewerReady: () => {
       api = {
@@ -288,6 +291,7 @@
       window.vironStrata = { status: api.status, click: api.click, demo: startDemo,
         source: () => source, note: () => note.textContent };
       loading.style.display = 'none';
+      StrataBoot.ready();
       fit();
       // #viron=... watches that Viron; #demo (or ?demo) plays the recording;
       // otherwise the page opens on the public world, falling back to the demo.
@@ -328,6 +332,27 @@
   new ResizeObserver(fit).observe(document.getElementById('stage'));
 }
 </script>
-{{{ SCRIPT }}}
+<!-- emcc's script tag, kept inert: web/strata-boot.js starts it behind the
+     loading shell. data-bytes is the download's size, stamped by the build. -->
+<template id="strata-glue" data-bytes="0">{{{ SCRIPT }}}</template>
+<!-- The loading shell, vendored from Strata, and its bridge to this build; the
+     build puts both inline (web/strata_page.cmake). -->
+<script src="strata-kit/strata-loader.js"></script>
+<script src="strata-boot.js"></script>
+<script>
+  // The loading shell: the trailer's first frame behind real progress, and the
+  // trailer itself, with the reason, if the live view can't run here. The
+  // media are the preview clip on danielstephenson.dev.
+  StrataBoot.start({
+    wasm: 'viron-strata.wasm',
+    title: 'viron-strata',
+    poster: 'https://danielstephenson.dev/3d/viron-strata/poster.jpg',
+    posterAlt: 'viron-strata: two Viron grids and their entities',
+    trailer: { webm: 'https://danielstephenson.dev/3d/viron-strata/clip.webm', mp4: 'https://danielstephenson.dev/3d/viron-strata/clip.mp4' },
+    trailerLabel: 'A recorded clip of viron-strata',
+    fallback: { href: 'https://danielstephenson.dev/play', text: 'More games' },
+    canvas: document.getElementById('canvas')
+  }).catch(function () {});  // the loading shell already shows why
+</script>
 </body>
 </html>

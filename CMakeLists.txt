@@ -119,6 +119,16 @@ if(VIRON_STRATA_WEB)
         "--shell-file=${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html")
     set_property(TARGET viron-strata-web APPEND PROPERTY LINK_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html" "${CMAKE_CURRENT_SOURCE_DIR}/web/demo/recording.json")
+    # The loading shell (web/strata-kit, vendored from Strata) and its bridge go
+    # inline into the page, with the download's size (web/strata_page.cmake).
+    set_property(TARGET viron-strata-web APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/web/strata-kit/strata-loader.js"
+      "${CMAKE_CURRENT_SOURCE_DIR}/web/strata-boot.js")
+    add_custom_command(TARGET viron-strata-web POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" "-DHTML=$<TARGET_FILE:viron-strata-web>"
+              "-DWASM=$<TARGET_FILE_DIR:viron-strata-web>/$<TARGET_FILE_BASE_NAME:viron-strata-web>.wasm"
+              "-DWEB=${CMAKE_CURRENT_SOURCE_DIR}/web" -P "${CMAKE_CURRENT_SOURCE_DIR}/web/strata_page.cmake"
+      VERBATIM)
 endif()
 
 if(VIRON_STRATA_BUILD_TESTS)
