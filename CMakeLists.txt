@@ -5,7 +5,7 @@
 #   cmake --build build -j4
 #   ctest --test-dir build --output-on-failure
 #
-# Strata is fetched at the commit in strata.ref (the v0.6.0 release), or taken
+# Strata is fetched at the commit in strata.ref (the v0.7.0 release), or taken
 # from a local checkout with -DFETCHCONTENT_SOURCE_DIR_STRATA=<path>.
 # nlohmann/json is fetched as a release archive pinned by SHA-256. libcurl
 # comes from the system (libcurl4-openssl-dev or libcurl4-gnutls-dev).
